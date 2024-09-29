@@ -1,210 +1,160 @@
-#v2
 import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import json
+from statistics import mode
 
-
-model =0 
-sleep_solutions = ["Meditation before bed", "No screen time 1 hour before bed",
-        "Light stretching before bed", "Avoid caffeine after noon",
-        "Deep breathing exercises", "Progressive muscle relaxation",
-        "Establish a consistent bedtime routine", "Optimize bedroom environment"]
-
-def parse_json_data(json_data):
-    try:
-        data = json.loads(json_data)
-        heart_rate = data['heart_rate']
-        hrv = data['hrv']
-        return torch.Tensor([heart_rate, hrv])  # Return as tensor for the RL model
-    except json.JSONDecodeError:
-        print("Invalid JSON format")
-        return None
-    
-def choose_action(state):
-    global epsilon
-    if np.random.rand() <= epsilon:  # Explore with probability epsilon
-        return random.randrange(action_size)  # Choose a random action (exploration)
-    
-    # Exploit: Choose the action with the highest Q-value (best action for this state)
-    q_values = model(torch.FloatTensor(state))  # Get Q-values for the current state
-    return torch.argmax(q_values).item()
-
-class SleepEnvironment:
-    def __init__(self, sleep_data):
-        self.sleep_data = sleep_data
-        self.current_state = None
-
-    def reset(self):
-        # Reset environment to initial state
-        self.current_state = random.choice(self.sleep_data)  # Random initial sleep data
-        return self.current_state
-
-    def step(self, action):
-        # Apply sleep solution and return new state and reward
-        heart_rate = self.current_state['heart_rate']
-        hrv = self.current_state['hrv']
-        
-        # Simulate state transition based on action
-        # (in real use, you'd have more complex logic based on sleep improvement)
-        if action == 0:  # "Meditation before bed"
-            heart_rate -= 2  # Meditation might lower heart rate
-            hrv += 1  # Increase HRV
-        elif action == 1:  # "No screen time"
-            heart_rate -= 1
-            hrv += 1
-        # Add more actions and corresponding effects on heart rate and HRV
-        
-        # New state after applying the action
-        new_state = {'heart_rate': heart_rate, 'hrv': hrv}
-        
-        # Calculate reward based on improvement in sleep quality (customize this logic)
-        reward = self.calculate_reward(heart_rate, hrv)
-        
-        # Update current state to new state
-        self.current_state = new_state
-        return new_state, reward
-
-    def calculate_reward(self, heart_rate, hrv):
-        # Custom reward function based on heart rate and HRV
-        if heart_rate < 60 and hrv > 8:
-            return 10  # High reward for optimal heart rate and HRV
-        elif 60 <= heart_rate <= 70 and 5 <= hrv <= 8:
-            return 5  # Medium reward
-        else:
-            return 1  # Low reward
-
-
-class DQNAgent(nn.Module):
+class QNetwork(nn.Module):
     def __init__(self, state_size, action_size):
-        super(DQNAgent, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_size, 64)  # Input: heart rate and HRV
         self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, action_size)
+        self.fc3 = nn.Linear(32, action_size)  # Output: Q-values for each action
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
+    def forward(self, state):
+        x = torch.relu(self.fc1(state))
         x = torch.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        return self.fc3(x)  # Q-values for each action (sleep solutions)
 
-# Initialize parameters
-state_size = 2  # Input: heart rate, HRV
-action_size = 8  # Number of possible sleep solutions
+# Function to load JSON data from a file
+def load_json_file(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            json_data = json.load(file)
+        return json_data
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Invalid JSON format in file: {file_path}")
+        return None
 
-agent = DQNAgent(state_size, action_size)
+# Function to parse JSON data into a tensor
+def parse_json_data(json_entry):
+    try:
+        heart_rate = json_entry['heart_rate']
+        hrv = json_entry['hrv']
+        return torch.Tensor([heart_rate, hrv])  # Return as tensor for the RL model
+    except KeyError:
+        print("Invalid data format in JSON")
+        return None
 
-# Hyperparameters
-gamma = 0.95  # Discount factor for future rewards
-epsilon = 1.0  # Exploration rate (initially high to explore more)
-epsilon_min = 0.01  # Minimum exploration rate
-epsilon_decay = 0.995  # Decay rate for exploration
-learning_rate = 0.001
-
-optimizer = optim.Adam(agent.parameters(), lr=learning_rate)
-criterion = nn.MSELoss()
-
-# Memory buffer for experience replay
-memory = []
-
-def remember(state, action, reward, next_state):
-    memory.append((state, action, reward, next_state))
-
-def act(state):
-    if np.random.rand() <= epsilon:
-        # Explore: choose random action
-        return random.randrange(action_size)
-    else:
-        # Exploit: choose best action based on current Q-values
-        state_tensor = torch.Tensor(state)
-        q_values = agent(state_tensor)
-        return torch.argmax(q_values).item()
-
-def replay(batch_size):
-    global epsilon
-    if len(memory) < batch_size:
-        return
-    
-    # Sample a batch of experiences from memory
-    minibatch = random.sample(memory, batch_size)
-    
-    for state, action, reward, next_state in minibatch:
-        state_tensor = torch.Tensor(state)
-        next_state_tensor = torch.Tensor(next_state)
-        
-        # Compute target Q-value
-        target = reward
-        if next_state is not None:
-            target += gamma * torch.max(agent(next_state_tensor)).item()
-        
-        # Predicted Q-value
-        predicted_q = agent(state_tensor)[action]
-        
-        # Compute loss and perform backpropagation
-        loss = criterion(predicted_q, torch.tensor([target]))
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    
-    # Decay exploration rate
-    if epsilon > epsilon_min:
-        epsilon *= epsilon_decay
-        
-def train_agent(env, episodes=1000, batch_size=32):
-    for e in range(episodes):
-        # Reset environment for each episode
-        state = env.reset()
-        state = np.array([state['heart_rate'], state['hrv']])
-        
-        for time in range(500):  # Max time steps per episode
-            # Choose an action
-            action = act(state)
-            
-            # Take action and observe new state and reward
-            next_state, reward = env.step(action)
-            next_state = np.array([next_state['heart_rate'], next_state['hrv']])
-            
-            # Store experience in memory
-            remember(state, action, reward, next_state)
-            
-            # Transition to next state
-            state = next_state
-            
-            # Perform experience replay to train the agent
-            replay(batch_size)
-        
-        # Print progress every 100 episodes
-        if (e + 1) % 100 == 0:
-            print(f"Episode {e + 1}/{episodes}: Epsilon {epsilon:.2}")
-
-# Example sleep data to initialize the environment
-sleep_data = [
-    {'heart_rate': 70, 'hrv': 5},  # Example initial states
-    {'heart_rate': 65, 'hrv': 7},
-    {'heart_rate': 80, 'hrv': 3}
+# Define sleep solutions (actions)
+sleep_solutions = [
+    "Meditation before bed", 
+    "No screen time 1 hour before bed",
+    "Light stretching before bed",
+    "Avoid caffeine after noon",
+    "Deep breathing exercises",
+    "Progressive muscle relaxation",
+    "Establish a consistent bedtime routine",
+    "Optimize bedroom environment"
 ]
 
-# Initialize the environment and train the agent
-env = SleepEnvironment(sleep_data)
+# Initialize Q-Network
+state_size = 2  # heart rate and HRV
+action_size = len(sleep_solutions)
+q_network = QNetwork(state_size, action_size)
+optimizer = optim.Adam(q_network.parameters(), lr=0.001)
+loss_fn = nn.MSELoss()
 
+# Hyperparameters
+epsilon = 0.3  # Increased exploration rate
+gamma = 0.99   # Discount factor
 
-train_agent(env)
+# Function to choose an action (epsilon-greedy strategy)
+def choose_action(state, epsilon):
+    if random.random() < epsilon:
+        # Explore: Choose a random action
+        return random.randint(0, action_size - 1)
+    else:
+        # Exploit: Choose the action with the highest Q-value
+        with torch.no_grad():
+            q_values = q_network(state)
+            return torch.argmax(q_values).item()
 
-def predict_best_solution(sleep_data):
-    state = np.array([sleep_data['heart_rate'], sleep_data['hrv']])
-    action = act(state)
+# Function to calculate reward (example: higher HRV and lower heart rate are better)
+def calculate_reward(new_sleep_data):
+    heart_rate = new_sleep_data['heart_rate']
+    hrv = new_sleep_data['hrv']
+
+    # Define reward: High HRV and low heart rate are considered good sleep quality
+    if heart_rate < 60 and hrv > 8:
+        return 10  # High reward for excellent sleep
+    elif 60 <= heart_rate <= 70 and 5 <= hrv <= 8:
+        return 5   # Medium reward for average sleep
+    else:
+        return 1   # Low reward for poor sleep
+
+# Q-learning function
+def q_learning(json_entry):
+    state = parse_json_data(json_entry)
+    if state is None:
+        return  # Invalid data, skip this iteration
+
+    # Choose an action (sleep solution)
+    action = choose_action(state, epsilon)
+
+    # Simulate randomized new sleep data for demonstration (instead of hard-coding)
+    new_json_data = {
+        "heart_rate": random.randint(55, 70),  # Random heart rate
+        "hrv": random.randint(5, 10)          # Random HRV
+    }
     
-    # Map action (index) to corresponding sleep solution
-    sleep_solutions = [
-        "Meditation before bed", "No screen time 1 hour before bed",
-        "Light stretching before bed", "Avoid caffeine after noon",
-        "Deep breathing exercises", "Progressive muscle relaxation",
-        "Establish a consistent bedtime routine", "Optimize bedroom environment"
-    ]
-    
-    recommended_solution = sleep_solutions[action]
-    print(f"Recommended Sleep Solution: {recommended_solution}")
-    return recommended_solution
+    new_state = parse_json_data(new_json_data)
 
+    # Calculate reward based on new sleep data
+    reward = calculate_reward(new_json_data)
+
+    # Get predicted Q-values for current state-action pair
+    current_q_values = q_network(state)
+    target_q_values = current_q_values.clone()
+
+    # Get next max Q-value (Q-learning update rule)
+    with torch.no_grad():
+        next_q_values = q_network(new_state)
+        next_max_q_value = torch.max(next_q_values)
+
+    # Update Q-value for the chosen action
+    target_q_values[action] = reward + gamma * next_max_q_value
+
+    # Train the Q-network
+    loss = loss_fn(current_q_values, target_q_values)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    return sleep_solutions[action]  # Return the recommended solution
+
+# Best solution tracking
+def best_solution_tracking(q_solutions, counter, rounds):
+    if counter >= rounds:
+        # Check if the most frequently suggested solution dominates
+        if q_solutions.count(mode(q_solutions)) >= len(q_solutions) // 2:
+            print(f"Best solution found: {mode(q_solutions)}")
+            return True, mode(q_solutions)
+    return False
+
+# Load the sleep data from the JSON file
+file_path = "sleep_data.json"
+json_data = load_json_file(file_path)
+
+if json_data is not None and "sleep_data" in json_data:
+    q_solutions = []
+    counter = 0
+    rounds = 50  # Increased number of rounds for better exploration
+
+    for entry in json_data["sleep_data"]:
+        recommended_solution = q_learning(entry)
+        if recommended_solution:
+            print(f"Recommended Sleep Solution: {recommended_solution}")
+            q_solutions.append(recommended_solution)
+            counter += 1
+
+            # Check if the best solution is found
+            if best_solution_tracking(q_solutions, counter, rounds):
+                break
+else:
+    print("Failed to load or parse sleep data.")
